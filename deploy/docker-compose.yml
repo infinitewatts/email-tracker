@@ -1,0 +1,60 @@
+version: '3.8'
+
+# Email Tracker - Standalone Deployment for Portainer
+# Deploy this stack to track email opens via 1x1 transparent pixel
+
+services:
+  tracker:
+    image: node:22-alpine
+    container_name: email-tracker
+    restart: unless-stopped
+    working_dir: /app
+    command: >
+      sh -c "
+        apk add --no-cache python3 make g++ git &&
+        if [ ! -d /app/src ]; then
+          git clone https://github.com/infinitewatts/email-tracker.git /tmp/repo &&
+          cp -r /tmp/repo/* /app/ &&
+          rm -rf /tmp/repo;
+        fi &&
+        npm ci --only=production &&
+        node src/server.js
+      "
+    ports:
+      - "3001:3001"
+    environment:
+      - PORT=3001
+      - TRACKER_BASE_URL=${TRACKER_BASE_URL:-https://t.affordablesolar.io}
+      - NODE_ENV=production
+    volumes:
+      - tracker-data:/app/data
+      - tracker-app:/app
+    healthcheck:
+      test: ["CMD", "wget", "-q", "--spider", "http://localhost:3001/health"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+    networks:
+      - traefik-public
+
+  # Optional: Cloudflare Tunnel for exposing the tracker
+  # Uncomment if you want automatic tunnel (requires CLOUDFLARE_TUNNEL_TOKEN)
+  # cloudflared:
+  #   image: cloudflare/cloudflared:latest
+  #   container_name: email-tracker-tunnel
+  #   restart: unless-stopped
+  #   command: tunnel run
+  #   environment:
+  #     - TUNNEL_TOKEN=${CLOUDFLARE_TUNNEL_TOKEN}
+  #   networks:
+  #     - traefik-public
+
+volumes:
+  tracker-data:
+    driver: local
+  tracker-app:
+    driver: local
+
+networks:
+  traefik-public:
+    external: true

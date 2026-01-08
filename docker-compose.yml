@@ -1,0 +1,37 @@
+version: '3.8'
+
+# Standalone email tracking server deployment
+# For full stack with Inbox Zero, use docker-compose.nas.yml
+
+services:
+  tracker:
+    build: .
+    container_name: email-tracker
+    restart: unless-stopped
+    ports:
+      - "3001:3001"
+    environment:
+      - PORT=3001
+      - TRACKER_BASE_URL=${TRACKER_BASE_URL:-https://t.affordablesolar.io}
+    volumes:
+      - tracker-data:/app
+    healthcheck:
+      test: ["CMD", "wget", "-q", "--spider", "http://localhost:3001/health"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+
+  # Optional: Cloudflare Tunnel sidecar
+  # Uncomment and set CLOUDFLARE_TUNNEL_TOKEN in .env
+  # cloudflared:
+  #   image: cloudflare/cloudflared:latest
+  #   container_name: cloudflared-tunnel
+  #   restart: unless-stopped
+  #   command: tunnel --no-autoupdate run
+  #   environment:
+  #     - TUNNEL_TOKEN=${CLOUDFLARE_TUNNEL_TOKEN}
+  #   depends_on:
+  #     - tracker
+
+volumes:
+  tracker-data:

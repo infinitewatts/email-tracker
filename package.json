@@ -1,0 +1,18 @@
+{
+  "name": "email-tracker",
+  "version": "1.0.0",
+  "description": "Email open tracking server - Shortwave-style pixel tracking",
+  "main": "src/server.js",
+  "type": "module",
+  "scripts": {
+    "start": "node src/server.js",
+    "dev": "node --watch src/server.js"
+  },
+  "dependencies": {
+    "better-sqlite3": "^11.0.0",
+    "cors": "^2.8.5",
+    "dotenv": "^17.2.3",
+    "express": "^4.18.2",
+    "nanoid": "^5.0.4"
+  }
+}
