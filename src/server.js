@@ -5,6 +5,7 @@ import Database from 'better-sqlite3';
 import { nanoid } from 'nanoid';
 import { fileURLToPath } from 'url';
 import { dirname, join } from 'path';
+import { copyFileSync, existsSync, mkdirSync, statSync } from 'fs';
 
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = dirname(__filename);
@@ -77,6 +78,39 @@ const GOOGLE_IP_PREFIXES = [
   '216.58.',    // Google
 ];
 
+const DEFAULT_DB_PATH = join(__dirname, '..', 'tracker.db');
+const DATA_DB_PATH = '/data/tracker.db';
+const CUSTOM_DB_PATH = process.env.TRACKER_DB_PATH;
+
+const isEmptyFile = (path) => {
+  try {
+    return statSync(path).size === 0;
+  } catch {
+    return true;
+  }
+};
+
+const getDbPath = () => {
+  if (CUSTOM_DB_PATH) return CUSTOM_DB_PATH;
+  return existsSync('/data') ? DATA_DB_PATH : DEFAULT_DB_PATH;
+};
+
+const ensurePersistentDb = (dbPath) => {
+  if (dbPath === DEFAULT_DB_PATH) return;
+  if (!existsSync(DEFAULT_DB_PATH)) return;
+
+  const needsCopy = !existsSync(dbPath) || isEmptyFile(dbPath);
+  if (!needsCopy) return;
+
+  try {
+    mkdirSync(dirname(dbPath), { recursive: true });
+    copyFileSync(DEFAULT_DB_PATH, dbPath);
+    console.log(`[DB] Copied ${DEFAULT_DB_PATH} -> ${dbPath}`);
+  } catch (err) {
+    console.error('[DB] Failed to copy database to persistent path:', err.message);
+  }
+};
+
 function isBot(userAgent, ip) {
   const ua = (userAgent || '').toLowerCase();
 
@@ -100,7 +134,9 @@ function isBot(userAgent, ip) {
 }
 
 // Initialize SQLite database
-const db = new Database(join(__dirname, '..', 'tracker.db'));
+const dbPath = getDbPath();
+ensurePersistentDb(dbPath);
+const db = new Database(dbPath);
 
 // Create tables
 db.exec(`
