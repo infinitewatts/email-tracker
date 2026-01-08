@@ -11,6 +11,23 @@ const __dirname = dirname(__filename);
 
 const app = express();
 const PORT = process.env.PORT || 3001;
+const API_KEY = process.env.API_KEY;
+
+// API Key authentication middleware
+const requireApiKey = (req, res, next) => {
+  if (!API_KEY) {
+    // No API key configured - allow access (dev mode)
+    return next();
+  }
+
+  const providedKey = req.headers['x-api-key'] || req.query.apiKey;
+
+  if (!providedKey || providedKey !== API_KEY) {
+    return res.status(401).json({ error: 'Unauthorized - Invalid or missing API key' });
+  }
+
+  next();
+};
 
 // 1x1 transparent GIF (43 bytes)
 const TRANSPARENT_GIF = Buffer.from(
@@ -52,6 +69,9 @@ app.use(express.json());
 app.get('/health', (req, res) => {
   res.json({ status: 'ok', timestamp: new Date().toISOString() });
 });
+
+// Protected routes - require API key
+app.use('/api', requireApiKey);
 
 // Create a new tracking pixel
 app.post('/api/pixels', (req, res) => {
@@ -219,8 +239,8 @@ app.get('/api/activity', (req, res) => {
   });
 });
 
-// Simple HTML dashboard
-app.get('/', (req, res) => {
+// Simple HTML dashboard (protected)
+app.get('/', requireApiKey, (req, res) => {
   const emails = db.prepare(`
     SELECT
       p.email_id,
