@@ -35,6 +35,70 @@ const TRANSPARENT_GIF = Buffer.from(
   'base64'
 );
 
+// Known bot/proxy detection
+const BOT_USER_AGENTS = [
+  'googlebot',
+  'google-smtp',
+  'googleimageproxy',
+  'feedfetcher-google',
+  'bingbot',
+  'yahoo',
+  'slurp',
+  'duckduckbot',
+  'baiduspider',
+  'yandexbot',
+  'facebookexternalhit',
+  'twitterbot',
+  'linkedinbot',
+  'whatsapp',
+  'slackbot',
+  'telegrambot',
+  'discordbot',
+  'applebot',
+  'pingdom',
+  'uptimerobot',
+  'monitor',
+  'crawler',
+  'spider',
+  'bot/',
+  'bot;',
+];
+
+// Google's known IP ranges for image proxy (partial list - these are common prefixes)
+const GOOGLE_IP_PREFIXES = [
+  '66.102.',    // Google
+  '66.249.',    // Googlebot
+  '72.14.',     // Google
+  '74.125.',    // Google
+  '173.194.',   // Google
+  '192.178.',   // Google image proxy
+  '209.85.',    // Google
+  '216.239.',   // Google
+  '216.58.',    // Google
+];
+
+function isBot(userAgent, ip) {
+  const ua = (userAgent || '').toLowerCase();
+
+  // Check user agent
+  for (const botPattern of BOT_USER_AGENTS) {
+    if (ua.includes(botPattern)) {
+      return { isBot: true, reason: `user-agent: ${botPattern}` };
+    }
+  }
+
+  // Check IP against known Google proxy ranges
+  if (ip) {
+    for (const prefix of GOOGLE_IP_PREFIXES) {
+      if (ip.startsWith(prefix)) {
+        return { isBot: true, reason: `ip-range: ${prefix}*` };
+      }
+    }
+  }
+
+  return { isBot: false };
+}
+
 // Initialize SQLite database
 const db = new Database(join(__dirname, '..', 'tracker.db'));
 
@@ -54,12 +118,37 @@ db.exec(`
     opened_at DATETIME DEFAULT CURRENT_TIMESTAMP,
     ip_address TEXT,
     user_agent TEXT,
+    is_bot INTEGER DEFAULT 0,
+    bot_reason TEXT,
     FOREIGN KEY (pixel_id) REFERENCES pixels(id)
   );
 
   CREATE INDEX IF NOT EXISTS idx_pixels_email_id ON pixels(email_id);
   CREATE INDEX IF NOT EXISTS idx_opens_pixel_id ON opens(pixel_id);
 `);
+
+// Migration: Add bot columns to existing opens table if they don't exist
+try {
+  const tableInfo = db.prepare("PRAGMA table_info(opens)").all();
+  const columnNames = tableInfo.map(col => col.name);
+
+  if (!columnNames.includes('is_bot')) {
+    db.prepare("ALTER TABLE opens ADD COLUMN is_bot INTEGER DEFAULT 0").run();
+    console.log("[MIGRATION] Added is_bot column to opens table");
+  }
+  if (!columnNames.includes('bot_reason')) {
+    db.prepare("ALTER TABLE opens ADD COLUMN bot_reason TEXT").run();
+    console.log("[MIGRATION] Added bot_reason column to opens table");
+  }
+
+  // Always ensure no NULL values in is_bot (treat as human opens)
+  const updated = db.prepare("UPDATE opens SET is_bot = 0 WHERE is_bot IS NULL").run();
+  if (updated.changes > 0) {
+    console.log(`[MIGRATION] Set ${updated.changes} NULL is_bot values to 0`);
+  }
+} catch (err) {
+  console.error("[MIGRATION] Error:", err.message);
+}
 
 // Middleware
 app.use(cors());
@@ -109,13 +198,17 @@ app.get('/v1/:pixelId.gif', (req, res) => {
     const ip = req.headers['x-forwarded-for'] || req.socket.remoteAddress;
     const userAgent = req.headers['user-agent'] || '';
 
-    const stmt = db.prepare(`
-      INSERT INTO opens (pixel_id, ip_address, user_agent)
-      VALUES (?, ?, ?)
-    `);
-    stmt.run(pixelId, ip, userAgent);
+    // Detect if this is a bot/proxy
+    const botCheck = isBot(userAgent, ip);
 
-    console.log(`[OPEN] Pixel: ${pixelId}, IP: ${ip}, Time: ${new Date().toISOString()}`);
+    const stmt = db.prepare(`
+      INSERT INTO opens (pixel_id, ip_address, user_agent, is_bot, bot_reason)
+      VALUES (?, ?, ?, ?, ?)
+    `);
+    stmt.run(pixelId, ip, userAgent, botCheck.isBot ? 1 : 0, botCheck.reason || null);
+
+    const botTag = botCheck.isBot ? ` [BOT: ${botCheck.reason}]` : '';
+    console.log(`[OPEN] Pixel: ${pixelId}, IP: ${ip}, Time: ${new Date().toISOString()}${botTag}`);
   }
 
   res.set({
@@ -131,12 +224,17 @@ app.get('/v1/:pixelId.gif', (req, res) => {
 // Get tracking status for an email
 app.get('/api/status/:emailId', (req, res) => {
   const { emailId } = req.params;
+  const includeBots = req.query.includeBots === 'true';
+
+  // Filter condition for human opens only (unless includeBots=true)
+  const botFilter = includeBots ? '' : 'AND is_bot = 0';
 
   const pixels = db.prepare(`
     SELECT p.id as pixel_id, p.recipient, p.subject, p.created_at as sent_at,
-           (SELECT COUNT(*) FROM opens WHERE pixel_id = p.id) as open_count,
-           (SELECT opened_at FROM opens WHERE pixel_id = p.id ORDER BY opened_at ASC LIMIT 1) as first_opened,
-           (SELECT opened_at FROM opens WHERE pixel_id = p.id ORDER BY opened_at DESC LIMIT 1) as last_opened
+           (SELECT COUNT(*) FROM opens WHERE pixel_id = p.id ${botFilter}) as open_count,
+           (SELECT COUNT(*) FROM opens WHERE pixel_id = p.id AND is_bot = 1) as bot_open_count,
+           (SELECT opened_at FROM opens WHERE pixel_id = p.id ${botFilter} ORDER BY opened_at ASC LIMIT 1) as first_opened,
+           (SELECT opened_at FROM opens WHERE pixel_id = p.id ${botFilter} ORDER BY opened_at DESC LIMIT 1) as last_opened
     FROM pixels p
     WHERE p.email_id = ?
   `).all(emailId);
@@ -149,6 +247,7 @@ app.get('/api/status/:emailId', (req, res) => {
       sentAt: p.sent_at,
       opened: p.open_count > 0,
       openCount: p.open_count,
+      botOpenCount: p.bot_open_count,
       firstOpened: p.first_opened,
       lastOpened: p.last_opened
     }))
@@ -172,6 +271,8 @@ app.get('/api/opens/:pixelId', (req, res) => {
 // Dashboard API
 app.get('/api/dashboard', (req, res) => {
   const limit = parseInt(req.query.limit) || 50;
+  const includeBots = req.query.includeBots === 'true';
+  const botFilter = includeBots ? '' : 'AND is_bot = 0';
 
   const emails = db.prepare(`
     SELECT
@@ -179,8 +280,9 @@ app.get('/api/dashboard', (req, res) => {
       p.subject,
       GROUP_CONCAT(p.recipient) as recipients,
       MIN(p.created_at) as sent_at,
-      SUM((SELECT COUNT(*) FROM opens WHERE pixel_id = p.id)) as total_opens,
-      COUNT(DISTINCT CASE WHEN (SELECT COUNT(*) FROM opens WHERE pixel_id = p.id) > 0 THEN p.recipient END) as recipients_opened,
+      SUM((SELECT COUNT(*) FROM opens WHERE pixel_id = p.id ${botFilter})) as total_opens,
+      SUM((SELECT COUNT(*) FROM opens WHERE pixel_id = p.id AND is_bot = 1)) as bot_opens,
+      COUNT(DISTINCT CASE WHEN (SELECT COUNT(*) FROM opens WHERE pixel_id = p.id ${botFilter}) > 0 THEN p.recipient END) as recipients_opened,
       COUNT(DISTINCT p.recipient) as total_recipients
     FROM pixels p
     GROUP BY p.email_id
@@ -195,6 +297,7 @@ app.get('/api/dashboard', (req, res) => {
 app.get('/api/activity', (req, res) => {
   const limit = parseInt(req.query.limit) || 50;
   const since = req.query.since; // ISO timestamp for polling new opens
+  const includeBots = req.query.includeBots === 'true';
 
   let query = `
     SELECT
@@ -202,6 +305,8 @@ app.get('/api/activity', (req, res) => {
       o.opened_at,
       o.ip_address,
       o.user_agent,
+      o.is_bot,
+      o.bot_reason,
       p.id as pixel_id,
       p.email_id,
       p.recipient,
@@ -209,12 +314,17 @@ app.get('/api/activity', (req, res) => {
       p.created_at as sent_at
     FROM opens o
     JOIN pixels p ON o.pixel_id = p.id
+    WHERE 1=1
   `;
 
   const params = [];
 
+  if (!includeBots) {
+    query += ` AND o.is_bot = 0 `;
+  }
+
   if (since) {
-    query += ` WHERE o.opened_at > ? `;
+    query += ` AND o.opened_at > ? `;
     params.push(since);
   }
 
@@ -226,8 +336,9 @@ app.get('/api/activity', (req, res) => {
   // Get count of new opens since timestamp (for badge)
   let newCount = 0;
   if (since) {
+    const botCondition = includeBots ? '' : 'AND is_bot = 0';
     const countResult = db.prepare(`
-      SELECT COUNT(*) as count FROM opens WHERE opened_at > ?
+      SELECT COUNT(*) as count FROM opens WHERE opened_at > ? ${botCondition}
     `).get(since);
     newCount = countResult.count;
   }
@@ -247,8 +358,9 @@ app.get('/', requireApiKey, (req, res) => {
       p.subject,
       p.recipient,
       p.created_at as sent_at,
-      (SELECT COUNT(*) FROM opens WHERE pixel_id = p.id) as open_count,
-      (SELECT opened_at FROM opens WHERE pixel_id = p.id ORDER BY opened_at DESC LIMIT 1) as last_opened
+      (SELECT COUNT(*) FROM opens WHERE pixel_id = p.id AND is_bot = 0) as open_count,
+      (SELECT COUNT(*) FROM opens WHERE pixel_id = p.id AND is_bot = 1) as bot_count,
+      (SELECT opened_at FROM opens WHERE pixel_id = p.id AND is_bot = 0 ORDER BY opened_at DESC LIMIT 1) as last_opened
     FROM pixels p
     ORDER BY sent_at DESC
     LIMIT 100
@@ -260,6 +372,7 @@ app.get('/', requireApiKey, (req, res) => {
       ? '<span class="badge badge-success">Opened</span>'
       : '<span class="badge badge-pending">Sent</span>';
     const lastOpened = e.last_opened ? new Date(e.last_opened).toLocaleString() : '-';
+    const botInfo = e.bot_count > 0 ? `<span class="badge badge-bot">${e.bot_count} bot</span>` : '';
 
     tableRows += `
     <tr>
@@ -267,7 +380,7 @@ app.get('/', requireApiKey, (req, res) => {
       <td>${e.recipient}</td>
       <td>${new Date(e.sent_at).toLocaleString()}</td>
       <td>${statusBadge}</td>
-      <td>${e.open_count}</td>
+      <td>${e.open_count} ${botInfo}</td>
       <td>${lastOpened}</td>
     </tr>`;
   }
@@ -285,6 +398,7 @@ app.get('/', requireApiKey, (req, res) => {
     .badge { display: inline-block; padding: 2px 8px; border-radius: 12px; font-size: 12px; }
     .badge-success { background: #dcfce7; color: #166534; }
     .badge-pending { background: #f3f4f6; color: #6b7280; }
+    .badge-bot { background: #fef3c7; color: #92400e; margin-left: 4px; }
   </style>
 </head>
 <body>
