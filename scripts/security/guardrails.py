@@ -22,7 +22,7 @@ ASSIGNMENT_PATTERNS = [
 ]
 
 ALLOWED_LITERAL_RE = re.compile(
-    r"(?i)^(changeme|change_me|your[_-]?.*|example|placeholder|replace|todo|tbd|dummy|test|local|dev|development|<.*>|\*+)$"
+    r"(?i)^(changeme|change_me|your[_-]?.*|example|placeholder|replace|todo|tbd|dummy|test|local|dev|development|secret|salt|client_secret|client_id|<.*>|\*+)$"
 )
 
 SENSITIVE_PATHS = [
