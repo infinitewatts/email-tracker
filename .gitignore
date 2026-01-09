@@ -1,5 +1,7 @@
 node_modules/
 tracker.db
-.env
+.env*
+!.env.example
+!.env.nas.template
 *.log
 .DS_Store
