@@ -3,5 +3,6 @@ tracker.db
 .env*
 !.env.example
 !.env.nas.template
+docker-compose.nas.yml
 *.log
 .DS_Store
